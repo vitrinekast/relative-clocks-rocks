@@ -3,23 +3,35 @@
 #include <Button.h>
 #include <Wire.h>
 
-#define ENCODER_DO_NOT_USE_INTERRUPTS;
+#define ENCODER_DO_NOT_USE_INTERRUPTS
 
 Adafruit_MCP4728 mcp;
 
-int bpm = 120;
-float dividers[4] = {1.0, 1.0, 1.0, 1.0};
-static long gate_l = 40;
-unsigned long nexts[4] = {0,0,0,0};
-unsigned long nexts_end[4] = {0,0,0,0};
-unsigned long stepMs;
-int divideQ = 1;
-unsigned int channel_state[4] = {0, 0, 0, 0};
-channel channels[4] = {MCP4728_CHANNEL_A, MCP4728_CHANNEL_B, MCP4728_CHANNEL_C, MCP4728_CHANNEL_D};
+const long gate_l = 40;
 const int clockPin = A6;
-int clockValue;
 
-int knob_position = 0;
+uint16_t bpm = 200;
+uint16_t divideQ = 1;
+bool clock_in_high;
+unsigned long stepMs;
+long knob_position = 0;
+unsigned long clocked_now = millis();
+
+struct ChannelState {
+    unsigned long next_time;
+    unsigned long next_gated;
+    bool state;
+    float divider;
+    channel channel;
+};
+
+ChannelState channels_[4] = {
+    {0,0,0,1.0,MCP4728_CHANNEL_A},
+    {0,0,0,1.0,MCP4728_CHANNEL_B},
+    {0,0,0,1.0,MCP4728_CHANNEL_C},
+    {0,0,0,1.0,MCP4728_CHANNEL_D}
+};
+
 
 Encoder knob(2, 3);  // pins A, B
 Button button(4);
@@ -33,10 +45,6 @@ void setup() {
 
   unsigned long t = millis();
 
-  for (int i = 0; i < 4; i++) {
-    nexts[i] = t + stepMs * dividers[i];
-  }
-
   button.begin();
 
   if (!mcp.begin()) {
@@ -46,15 +54,18 @@ void setup() {
     }
   }
 
-  for(int i = 0; i < 4; i++) {
-    mcp.setChannelValue(channels[i], 0);
-  } 
-  
+
+  for(auto &ch : channels_) {
+    mcp.setChannelValue(ch.channel, 0);
+    ch.next_time = t + stepMs * ch.divider;
+  }
+
   delay(50);
-  for(int i = 0; i < 4; i++) {
-    mcp.setChannelValue(channels[i], 4095);
+  
+  for(auto &ch : channels_) {
+    mcp.setChannelValue(ch.channel, 4095);
     delay(150);
-    mcp.setChannelValue(channels[i], 0);
+    mcp.setChannelValue(ch.channel, 0);
   } 
 }
 
@@ -67,49 +78,69 @@ void updateBPM(int p) {
 void updateDividers(int p) {
   Serial.print("update dividers");
   divideQ += p;
+  
+  int idx = 1;
 
-  for (int i = 1; i < 4; i++) {
-    float step = 0.0005 * i * divideQ;
-    dividers[i] = 1 + step;
-    Serial.print(i);
+  for(auto &ch : channels_) {
+    float step = 0.0005 * idx * divideQ;
+    idx++;
+    ch.divider = 1 + step;
+    Serial.print(ch.channel);
     Serial.print(": ");
-    Serial.println(dividers[i]);
+    Serial.println(ch.divider);
   }
 }
 
 void loop() {
   unsigned long now = millis();
 
-  clockValue = analogRead(clockPin);
+  clock_in_high = analogRead(clockPin) > 512;
 
-  Serial.println(clockValue);
+  // when the CLOCK in is HIGH, re-calculate the next-time for the channels, and start timing the BPM.
+  if(clock_in_high) {
+    // if BPM has not been clocked before, set the clocked_now
+    if(clocked_now < 10) {
+      clocked_now = now;
+    } else {
+      unsigned long diff = now - clocked_now;
+      bpm = (60000UL / diff) * 4;
+      stepMs = diff;
+      clocked_now = now;
+    }
 
-  for(int i = 0; i < 4; i++) {
-    if(now >= nexts[i]) {
-      nexts[i] += stepMs * dividers[i];
-      channel_state[i] = 1;
-      mcp.setChannelValue(channels[i], 4095);
+    for(auto &ch : channels_) {
+      ch.next_time = now + stepMs * ch.divider;
+    }
+  }
+  long new_position = knob.read() / 4;
+
+
+  // write to channels
+  for(auto &ch : channels_) {
+
+    // set channel state to 1 if passed the upcoming time.
+    if(now >= ch.next_time) {
+      ch.next_time += stepMs * ch.divider;
+      ch.state = true;
+      mcp.setChannelValue(ch.channel, 4095);
       unsigned long end = now + gate_l;
-
-      unsigned long max_end = nexts[i] - 50;
+      unsigned long max_end = ch.next_time - 50;
       if(end > max_end) end = max_end;
-
-      nexts_end[i] = end; 
-    } else if (now >= nexts_end[i] && channel_state[i] == 1) {
-        mcp.setChannelValue(channels[i], 0);
-        channel_state[i] = 0; 
+      ch.next_gated = end; 
+    } else if (now >= ch.next_gated && ch.state) {
+        mcp.setChannelValue(ch.channel, 0);
+        ch.state = false; 
     }
   }
 
-  long new_position = knob.read() / 4;
-  
-    if(new_position != knob_position) {
-      long diff = new_position - knob_position;
-      knob_position = new_position;
-      if(button.read() == Button::PRESSED) {
-        updateBPM(diff);
-      } else {
-        updateDividers(diff);
-      }
+  // parse the encoder
+  if(new_position != knob_position) {
+    long diff = new_position - knob_position;
+    knob_position = new_position;
+    if(button.read() == Button::PRESSED) {
+      updateBPM(diff);
+    } else {
+      updateDividers(diff);
     }
+  }
 }
