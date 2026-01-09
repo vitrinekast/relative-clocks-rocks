@@ -11,10 +11,12 @@ const long gate_l = 40;
 const int clockPin = A6;
 
 uint16_t bpm = 200;
-uint16_t divideQ = 1;
+float divideQ = 1.0;
+uint16_t divideQINT = 1;
+
 bool clock_in_high;
 unsigned long stepMs;
-long knob_position = 0;
+int32_t knob_position = 0;
 unsigned long clocked_now = millis();
 
 struct ChannelState {
@@ -23,18 +25,20 @@ struct ChannelState {
     bool state;
     float divider;
     channel channel;
+    int id;
 };
 
 ChannelState channels_[4] = {
-    {0,0,0,1.0,MCP4728_CHANNEL_A},
-    {0,0,0,1.0,MCP4728_CHANNEL_B},
-    {0,0,0,1.0,MCP4728_CHANNEL_C},
-    {0,0,0,1.0,MCP4728_CHANNEL_D}
+    {0,0,0,1.0,MCP4728_CHANNEL_A, 0},
+    {0,0,0,1.0,MCP4728_CHANNEL_B, 1},
+    {0,0,0,1.0,MCP4728_CHANNEL_C, 2},
+    {0,0,0,1.0,MCP4728_CHANNEL_D, 3}
 };
 
 
 Encoder knob(2, 3);  // pins A, B
 Button button(4);
+
 
 void setup() {
   Serial.begin(9600);
@@ -42,6 +46,8 @@ void setup() {
     delay(10);
 
   stepMs = (60000UL / bpm) * 4;
+
+  pinMode(LED_BUILTIN, OUTPUT);
 
   unsigned long t = millis();
 
@@ -75,24 +81,38 @@ void updateBPM(int p) {
   stepMs = (60000UL / bpm) * 4;  
 }
 
-void updateDividers(int p) {
-  Serial.print("update dividers");
-  divideQ += p;
-  
-  int idx = 1;
 
-  for(auto &ch : channels_) {
-    float step = 0.0005 * idx * divideQ;
-    idx++;
-    ch.divider = 1 + step;
-    Serial.print(ch.channel);
-    Serial.print(": ");
-    Serial.println(ch.divider);
-  }
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max) {
+ return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+};
+
+
+void updateDividers(int p) {
+  Serial.print("update dividers - ");
+  Serial.print(knob_position);
+  Serial.print(" - ");
+  divideQINT  += p;
+
+
+  divideQ = mapfloat(knob_position, -64.0, 64.0, 0.0, 2.0);
+  Serial.println(divideQ);
+  
+  // int idx = 1;
+
+  // for(auto &ch : channels_) {
+  //   float step = 0.0005 * idx * divideQ;
+  //   idx++;
+  //   ch.divider = 1 + step;
+  //   // Serial.print(ch.channel);
+  //   // Serial.print(": ");
+  //   // Serial.println(ch.divider);
+  // }
 }
 
 void loop() {
   unsigned long now = millis();
+
+  digitalWrite(LED_BUILTIN, divideQ == 1.0 ? HIGH : LOW);
 
   clock_in_high = analogRead(clockPin) > 512;
 
@@ -112,15 +132,14 @@ void loop() {
       ch.next_time = now + stepMs * ch.divider;
     }
   }
-  long new_position = knob.read() / 4;
-
+  int32_t new_position = knob.read() / 4;
 
   // write to channels
   for(auto &ch : channels_) {
 
     // set channel state to 1 if passed the upcoming time.
     if(now >= ch.next_time) {
-      ch.next_time += stepMs * ch.divider;
+      ch.next_time += (ch.id == 0 ? stepMs : stepMs * pow(divideQ, ch.id));
       ch.state = true;
       mcp.setChannelValue(ch.channel, 4095);
       unsigned long end = now + gate_l;
